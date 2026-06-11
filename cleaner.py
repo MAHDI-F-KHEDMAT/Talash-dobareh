@@ -8,6 +8,7 @@ import base64
 import socket
 import threading
 import subprocess
+import asyncio  # اضافه شدن کتابخانه اسنک برای تسریع تست پینگ
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
@@ -60,19 +61,16 @@ TARGETS = [
     "https://www.youtube.com"
 ]
 
-# متغیرهای کنترل وضعیت برای ترد لاگ‌گیری
 start_time = time.time()
 current_stage = "شروع پروژه"
 progress_info = "در حال آماده سازی..."
 
 def keep_alive_logger():
-    """هر ۵ دقیقه یک بار لاگ چاپ می‌کند تا گیت‌هاب اکشن متوجه زنده بودن پروسه شود."""
     while True:
         time.sleep(300)
         elapsed = int(time.time() - start_time) // 60
         print(f"[LOG - {elapsed}m elapsed] Stage: {current_stage} | Info: {progress_info}", flush=True)
 
-# فعال کردن ترد لاگ‌گیری پنج دقیقه‌ای
 logger_thread = threading.Thread(target=keep_alive_logger, daemon=True)
 logger_thread.start()
 
@@ -110,19 +108,68 @@ def fetch_url(url):
         pass
     return []
 
-def tcp_ping(host, port, timeout=2):
+# --- بخش بهینه‌سازی شده تست TCP به صورت کاملاً Async ---
+
+async def async_tcp_ping(host, port, timeout=1.5):
+    """تست پینگ به صورت غیرمسدودکننده (Async)"""
     try:
         t_start = time.perf_counter()
-        s = socket.create_connection((host, port), timeout=timeout)
+        # تلاش برای باز کردن کانکشن بدون مسدود کردن بقیه تسک‌ها
+        coro = asyncio.open_connection(host, port)
+        reader, writer = await asyncio.wait_for(coro, timeout=timeout)
         t_end = time.perf_counter()
-        s.close()
+        writer.close()
+        await writer.wait_closed()
         return (t_end - t_start) * 1000
     except:
         return None
 
+async def async_test_ping_and_stddev(node, semaphore):
+    """انجام ۵ پینگ متوالی با کنترل نرخ کانکشن‌های همزمان"""
+    async with semaphore:
+        pings = []
+        for _ in range(5):
+            p = await async_tcp_ping(node["host"], node["port"])
+            if p is None:
+                return None  # حذف سریع سرورهای مرده در اولین پینگ ناموفق
+            pings.append(p)
+            await asyncio.sleep(0.05)  # وقفه کوتاه بین پینگ‌های یک سرور
+        
+        mean = sum(pings) / len(pings)
+        variance = sum((x - mean) ** 2 for x in pings) / len(pings)
+        std_dev = math.sqrt(variance)
+        
+        if std_dev > 200:
+            return None
+        return node
+
+async def run_async_pings(parsed_nodes):
+    """مدیریت اجرای موازی تمام سرورها با ظرفیت ۵۰۰ کانکشن همزمان"""
+    global progress_info
+    # ایجاد یک سِمافور برای اجازه دادن به حداکثر ۵۰۰ کانکشن همزمان در کل گیت‌هاب اکشن
+    semaphore = asyncio.Semaphore(500)
+    tasks = [async_test_ping_and_stddev(node, semaphore) for node in parsed_nodes]
+    
+    alive_nodes = []
+    total_nodes = len(tasks)
+    idx = 0
+    
+    # پردازش خروجی‌ها به محض آماده شدن (Real-time)
+    for coro in asyncio.as_completed(tasks):
+        res = await coro
+        idx += 1
+        if res:
+            alive_nodes.append(res)
+        if idx % 200 == 0 or idx == total_nodes:
+            progress_info = f"محاسبه پینگ اسنک: {idx}/{total_nodes} انجام شد. زنده: {len(alive_nodes)}"
+            log(progress_info)
+            
+    return alive_nodes
+
+# --- پایان بخش Async ---
+
 def parse_vless(url_str):
     try:
-        # پاکسازی ساده برای جزییات آدرس
         clean_url = url_str.split('#')[0]
         if '?' in clean_url:
             base_part, query_part = clean_url.split('?', 1)
@@ -137,7 +184,6 @@ def parse_vless(url_str):
         if ':' not in address_port:
             return None
         
-        # هندل کردن احتمالی آیپی واکشی شده IPv6
         if ']' in address_port:
             address = address_port.split(']')[0] + ']'
             port_str = address_port.split(']')[-1].replace(':', '')
@@ -146,7 +192,6 @@ def parse_vless(url_str):
             
         port = int(port_str)
         
-        # پارس کردن ساده کوئری‌ها
         query = {}
         if query_part:
             for pair in query_part.split('&'):
@@ -154,7 +199,6 @@ def parse_vless(url_str):
                     k, v = pair.split('=', 1)
                     query[k] = v
 
-        # ساخت آبجکت outbound برای Xray
         network = query.get('type', query.get('network', 'tcp'))
         security = query.get('security', 'none')
         sni = query.get('sni', query.get('peer', ''))
@@ -202,24 +246,6 @@ def parse_vless(url_str):
     except:
         return None
 
-def test_ping_and_stddev(node):
-    # ۵ بار تست پینگ پیاپی
-    pings = []
-    for _ in range(5):
-        p = tcp_ping(node["host"], node["port"])
-        if p is None:
-            return None
-        pings.append(p)
-        time.sleep(0.1)
-    
-    mean = sum(pings) / len(pings)
-    variance = sum((x - mean) ** 2 for x in pings) / len(pings)
-    std_dev = math.sqrt(variance)
-    
-    if std_dev > 200:
-        return None
-    return node
-
 def test_xray_node(node, local_port):
     config = {
         "log": {"loglevel": "none"},
@@ -238,7 +264,6 @@ def test_xray_node(node, local_port):
         
     process = None
     try:
-        # تلاش برای اجرای هسته Xray
         process = subprocess.Popen(["xray", "run", "-config", config_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except:
         try:
@@ -246,7 +271,7 @@ def test_xray_node(node, local_port):
         except:
             return False
 
-    time.sleep(1.5)  # زمان کوتاه برای بالا آمدن پروسه مچ شده با اینباند کور
+    time.sleep(1.2)
     
     proxies = {
         "http": f"socks5h://127.0.0.1:{local_port}",
@@ -257,7 +282,7 @@ def test_xray_node(node, local_port):
     success = True
     for target in TARGETS:
         try:
-            resp = requests.get(target, proxies=proxies, headers=headers, timeout=6)
+            resp = requests.get(target, proxies=proxies, headers=headers, timeout=5)
             if resp.status_code < 200:
                 success = False
                 break
@@ -282,7 +307,7 @@ def main():
     log("شروع جمع‌آوری لینک‌های VLESS...")
     all_raw_links = []
     
-    with ThreadPoolExecutor(max_workers=15) as executor:
+    with ThreadPoolExecutor(max_workers=20) as executor:
         futures = {executor.submit(fetch_url, url): url for url in URLS}
         for i, future in enumerate(as_completed(futures), 1):
             res = future.result()
@@ -292,38 +317,27 @@ def main():
     unique_links = list(set(all_raw_links))
     log(f"جمع‌آوری به اتمام رسید. کل لینک‌ها: {len(all_raw_links)} | لینک‌های یکتا: {len(unique_links)}")
 
-    # پارس کردن ساختار لینک‌ها
     parsed_nodes = []
     for link in unique_links:
         parsed = parse_vless(link)
         if parsed:
             parsed_nodes.append(parsed)
 
-    # مرحله ۲ و ۳: تست TCP پینگ و فیلتر انحراف معیار بالای ۲۰۰ میلی‌ثانیه
-    current_stage = "مرحله دوم و سوم: فیلتر پینگ و انحراف معیار"
-    log("شروع انجام محاسبات پینگ و انحراف معیار به صورت موازی...")
-    alive_nodes = []
+    # مرحله ۲ و ۳: اجرای بخش بهینه‌سازی شده با Asyncio
+    current_stage = "مرحله دوم و سوم: فیلتر پینگ و انحراف معیار (Async)"
+    log("اجرای پینگ‌های همزمان فوق سریع...")
     
-    with ThreadPoolExecutor(max_workers=50) as executor:
-        futures = [executor.submit(test_ping_and_stddev, node) for node in parsed_nodes]
-        total_nodes = len(futures)
-        for idx, future in enumerate(as_completed(futures), 1):
-            res = future.result()
-            if res:
-                alive_nodes.append(res)
-            if idx % 100 == 0 or idx == total_nodes:
-                progress_info = f"محاسبه پینگ: {idx}/{total_nodes} انجام شد. زنده تا این لحظه: {len(alive_nodes)}"
-                log(progress_info)
+    # صدا زدن لوپ ناهمگام پایتون برای پردازش با ظرفیت بالا
+    alive_nodes = asyncio.run(run_async_pings(parsed_nodes))
 
-    log(f"پایان تست پینگ. تعداد کانفیگ‌های پایدار: {len(alive_nodes)}")
+    log(f"پایان تست پینگ سریع. تعداد کانفیگ‌های پایدار: {len(alive_nodes)}")
 
-    # مرحله ۴: تست واقعی با وبسایت‌های هدف از طریق دیتای ارسالی Xray Core
+    # مرحله ۴: تست واقعی وبسایت‌ها با Xray Core
     current_stage = "مرحله چهارم: تست اتصال به وبسایت‌های هدف"
     log("شروع تست نهایی اتصال به اینستاگرام، X و یوتیوب...")
     
-    # مدیریت پورت‌ها به منظور موازی‌سازی امن پروکسی بدون تداخل پورت
     port_queue = Queue()
-    for p in range(15000, 15040):  # حداکثر ۴۰ پردازش موازی همزمان Xray
+    for p in range(15000, 15050):  # افزایش تعداد تست‌های موازی Xray به ۵۰ پورت همزمان
         port_queue.put(p)
         
     final_configs = []
@@ -336,15 +350,15 @@ def main():
         finally:
             port_queue.put(port)
 
-    with ThreadPoolExecutor(max_workers=40) as executor:
+    with ThreadPoolExecutor(max_workers=50) as executor:
         futures = [executor.submit(worker_xray, node) for node in alive_nodes]
         total_xray = len(futures)
         for idx, future in enumerate(as_completed(futures), 1):
             res = future.result()
             if res:
                 final_configs.append(res)
-            if idx % 20 == 0 or idx == total_xray:
-                progress_info = f"تست Xray: {idx}/{total_xray} انجام شد. عبور کرده از فیلتر: {len(final_configs)}"
+            if idx % 50 == 0 or idx == total_xray:
+                progress_info = f"تست Xray: {idx}/{total_xray} انجام شد. عبور کرده: {len(final_configs)}"
                 log(progress_info)
 
     # مرحله ۵: ذخیره‌سازی خروجی
@@ -354,7 +368,7 @@ def main():
         for link in final_configs:
             f.write(link + "\n")
             
-    log(f"پروژه با موفقیت به پایان رسید! {len(final_configs)} کانفیگ معتبر در فایل {output_filename} ذخیره شد.")
+    log(f"پروژه با موفقیت به پایان رسید! {len(final_configs)} کانفیگ معتبر ذخیره شد.")
 
 if __name__ == "__main__":
     main()
