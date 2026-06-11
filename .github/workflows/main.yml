@@ -1,0 +1,46 @@
+name: VLESS Configs Refiner and Tester
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # اجرای خودکار هر ۶ ساعت یک‌بار
+  workflow_dispatch: # امکان اجرای دستی از تب Actions
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    
+    env:
+      PYTHONUNBUFFERED: 1 # غیرفعال کردن بافر خروجی پایتون جهت چاپ آنی لاگ‌ها
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python 3.10
+      uses: actions/actions-setup-python@v5
+      with:
+        python-version: '3.10'
+        cache: 'pip'
+
+    - name: Install Python Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests
+
+    - name: Install Xray Core
+      run: |
+        echo "Downloading and Installing official Xray-core..."
+        bash -c "$(curl -L https://github.com/XTLS/Xray-core/releases/latest/download/install-release.sh)" @ install
+        xray -version
+
+    - name: Run Python Refiner Script
+      run: |
+        python cleaner.py
+
+    - name: Commit and Push Results
+      run: |
+        git config --local user.email "actions@github.com"
+        git config --local user.name "GitHub Actions"
+        git add results.txt
+        # اگر تغییراتی وجود داشت، آن را کامیت و پوش می‌کند تا فایل در ریپازیتوری آپدیت شود.
+        git diff --quiet && git diff --staged --quiet || (git commit -m "Update refined VLESS configs [Skip CI]" && git push)
