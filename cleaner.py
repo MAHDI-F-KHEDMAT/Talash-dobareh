@@ -8,12 +8,12 @@ import base64
 import socket
 import threading
 import subprocess
-import asyncio  # اضافه شدن کتابخانه اسنک برای تسریع تست پینگ
+import asyncio
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 
-# تنظیمات اولیه
+# لیست آدرس‌های سورس کانفیگ‌ها
 URLS = [
     "https://raw.githubusercontent.com/itsyebekhe/PSG/main/subscriptions/xray/base64/mix",
     "https://raw.githubusercontent.com/shaoyouvip/free/refs/heads/main/base64.txt",
@@ -55,6 +55,7 @@ URLS = [
     "https://raw.githubusercontent.com/gfpcom/free-proxy-list/refs/heads/main/list/vless.txt"
 ]
 
+# وب‌سایت‌های هدف تست اتصال واقعی
 TARGETS = [
     "https://www.instagram.com",
     "https://www.x.com",
@@ -114,7 +115,6 @@ async def async_tcp_ping(host, port, timeout=1.5):
     """تست پینگ به صورت غیرمسدودکننده (Async)"""
     try:
         t_start = time.perf_counter()
-        # تلاش برای باز کردن کانکشن بدون مسدود کردن بقیه تسک‌ها
         coro = asyncio.open_connection(host, port)
         reader, writer = await asyncio.wait_for(coro, timeout=timeout)
         t_end = time.perf_counter()
@@ -125,15 +125,15 @@ async def async_tcp_ping(host, port, timeout=1.5):
         return None
 
 async def async_test_ping_and_stddev(node, semaphore):
-    """انجام ۵ پینگ متوالی با کنترل نرخ کانکشن‌های همزمان"""
+    """انجام پینگ متوالی با سیستم Fail-Fast برای تصفیه سریع سرورهای مرده"""
     async with semaphore:
         pings = []
         for _ in range(5):
             p = await async_tcp_ping(node["host"], node["port"])
             if p is None:
-                return None  # حذف سریع سرورهای مرده در اولین پینگ ناموفق
+                return None  # اگر حتی یک بار پینگ قطع شد، فوراً سرور را رد کن (افزایش چشمگیر سرعت)
             pings.append(p)
-            await asyncio.sleep(0.05)  # وقفه کوتاه بین پینگ‌های یک سرور
+            await asyncio.sleep(0.05)
         
         mean = sum(pings) / len(pings)
         variance = sum((x - mean) ** 2 for x in pings) / len(pings)
@@ -144,9 +144,8 @@ async def async_test_ping_and_stddev(node, semaphore):
         return node
 
 async def run_async_pings(parsed_nodes):
-    """مدیریت اجرای موازی تمام سرورها با ظرفیت ۵۰۰ کانکشن همزمان"""
+    """مدیریت اجرای موازی ۵۰۰ تست پینگ همزمان در رانر گیت‌هاب"""
     global progress_info
-    # ایجاد یک سِمافور برای اجازه دادن به حداکثر ۵۰۰ کانکشن همزمان در کل گیت‌هاب اکشن
     semaphore = asyncio.Semaphore(500)
     tasks = [async_test_ping_and_stddev(node, semaphore) for node in parsed_nodes]
     
@@ -154,14 +153,13 @@ async def run_async_pings(parsed_nodes):
     total_nodes = len(tasks)
     idx = 0
     
-    # پردازش خروجی‌ها به محض آماده شدن (Real-time)
     for coro in asyncio.as_completed(tasks):
         res = await coro
         idx += 1
         if res:
             alive_nodes.append(res)
         if idx % 200 == 0 or idx == total_nodes:
-            progress_info = f"محاسبه پینگ اسنک: {idx}/{total_nodes} انجام شد. زنده: {len(alive_nodes)}"
+            progress_info = f"تست پینگ ناهمگام: {idx}/{total_nodes} انجام شد. زنده: {len(alive_nodes)}"
             log(progress_info)
             
     return alive_nodes
@@ -271,7 +269,8 @@ def test_xray_node(node, local_port):
         except:
             return False
 
-    time.sleep(1.2)
+    # اصلاح تایمر: افزایش زمان خواب رانر برای لود کامل فرآیند Xray روی پورت محلی
+    time.sleep(2.5)
     
     proxies = {
         "http": f"socks5h://127.0.0.1:{local_port}",
@@ -282,11 +281,12 @@ def test_xray_node(node, local_port):
     success = True
     for target in TARGETS:
         try:
-            resp = requests.get(target, proxies=proxies, headers=headers, timeout=5)
-            if resp.status_code < 200:
+            # ارسال درخواست بدون ریدایرکت برای افزایش کارایی و سرعت تست سایت‌ها
+            resp = requests.get(target, proxies=proxies, headers=headers, timeout=5, allow_redirects=False)
+            if resp.status_code is None:
                 success = False
                 break
-        except:
+        except Exception:
             success = False
             break
 
@@ -323,21 +323,19 @@ def main():
         if parsed:
             parsed_nodes.append(parsed)
 
-    # مرحله ۲ و ۳: اجرای بخش بهینه‌سازی شده با Asyncio
+    # مرحله ۲ و ۳: فیلترینگ پینگ به روش Async
     current_stage = "مرحله دوم و سوم: فیلتر پینگ و انحراف معیار (Async)"
-    log("اجرای پینگ‌های همزمان فوق سریع...")
+    log("اجرای پینگ‌های همزمان فوق سریع با معماری غیرمسدودکننده...")
     
-    # صدا زدن لوپ ناهمگام پایتون برای پردازش با ظرفیت بالا
     alive_nodes = asyncio.run(run_async_pings(parsed_nodes))
+    log(f"پایان تست پینگ سریع. تعداد کانفیگ‌های پایدار اولیه: {len(alive_nodes)}")
 
-    log(f"پایان تست پینگ سریع. تعداد کانفیگ‌های پایدار: {len(alive_nodes)}")
-
-    # مرحله ۴: تست واقعی وبسایت‌ها با Xray Core
+    # مرحله ۴: تست اتصال واقعی وبسایت‌ها با Xray Core
     current_stage = "مرحله چهارم: تست اتصال به وبسایت‌های هدف"
     log("شروع تست نهایی اتصال به اینستاگرام، X و یوتیوب...")
     
     port_queue = Queue()
-    for p in range(15000, 15050):  # افزایش تعداد تست‌های موازی Xray به ۵۰ پورت همزمان
+    for p in range(15000, 15050):  # تخصیص پورت‌های موازی تا سقف ۵۰ تست همزمان
         port_queue.put(p)
         
     final_configs = []
@@ -361,14 +359,14 @@ def main():
                 progress_info = f"تست Xray: {idx}/{total_xray} انجام شد. عبور کرده: {len(final_configs)}"
                 log(progress_info)
 
-    # مرحله ۵: ذخیره‌سازی خروجی
+    # مرحله ۵: ذخیره‌سازی خروجی خروجی نهایی معتبر
     current_stage = "مرحله پنجم: ذخیره خروجی"
     output_filename = "results.txt"
     with open(output_filename, "w", encoding="utf-8") as f:
         for link in final_configs:
             f.write(link + "\n")
             
-    log(f"پروژه با موفقیت به پایان رسید! {len(final_configs)} کانفیگ معتبر ذخیره شد.")
+    log(f"پروژه با موفقیت به پایان رسید! {len(final_configs)} کانفیگ کاملاً معتبر و سالم ذخیره شد.")
 
 if __name__ == "__main__":
     main()
