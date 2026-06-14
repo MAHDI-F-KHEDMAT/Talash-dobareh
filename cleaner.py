@@ -55,7 +55,7 @@ URLS = [
     "https://raw.githubusercontent.com/gfpcom/free-proxy-list/refs/heads/main/list/vless.txt"
 ]
 
-# وب‌سایت‌های هدف تست اتصال واقعی (به همراه آمازون و OpenAI)
+# وب‌سایت‌های هدف تست اتصال واقعی
 TARGETS = [
     "https://www.instagram.com",
     "https://www.x.com",
@@ -271,7 +271,6 @@ def test_xray_node(node, local_port):
         except:
             return False
 
-    # اصلاح تایمر: زمان خواب رانر برای لود کامل فرآیند Xray روی پورت محلی
     time.sleep(2.5)
     
     proxies = {
@@ -283,8 +282,8 @@ def test_xray_node(node, local_port):
     success = True
     for target in TARGETS:
         try:
-            # اعمال تایم‌اوت سخت‌گیرانه ۱.۵ ثانیه برای گلچین کردن پرسرعت‌ترین کانفیگ‌ها
-            resp = requests.get(target, proxies=proxies, headers=headers, timeout=1.5, allow_redirects=False)
+            # کاهش تایم‌اوت به ۰.۵ ثانیه جهت فیلترینگ فوق‌العاده سخت‌گیرانه برای سرعت‌های فضایی
+            resp = requests.get(target, proxies=proxies, headers=headers, timeout=0.5, allow_redirects=False)
             if resp.status_code is None:
                 success = False
                 break
@@ -368,7 +367,7 @@ def main():
         for link in final_configs:
             f.write(link + "\n")
             
-    log(f"پروژه با موفقیت به پایان رسید! {len(final_configs)} کانفیگ بسیار سریع و تضمینی ذخیره شد.")
+    log(f"پروژه با موفقیت به پایان رسید! {len(final_configs)} کانفیگ با سرعت ماورایی ذخیره شد.")
 
 if __name__ == "__main__":
     main()
