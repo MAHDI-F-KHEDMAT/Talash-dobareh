@@ -55,11 +55,13 @@ URLS = [
     "https://raw.githubusercontent.com/gfpcom/free-proxy-list/refs/heads/main/list/vless.txt"
 ]
 
-# وب‌سایت‌های هدف تست اتصال واقعی
+# وب‌سایت‌های هدف تست اتصال واقعی (به همراه آمازون و OpenAI)
 TARGETS = [
     "https://www.instagram.com",
     "https://www.x.com",
-    "https://www.youtube.com"
+    "https://www.youtube.com",
+    "https://www.amazon.com",
+    "https://www.openai.com"
 ]
 
 start_time = time.time()
@@ -269,7 +271,7 @@ def test_xray_node(node, local_port):
         except:
             return False
 
-    # اصلاح تایمر: افزایش زمان خواب رانر برای لود کامل فرآیند Xray روی پورت محلی
+    # اصلاح تایمر: زمان خواب رانر برای لود کامل فرآیند Xray روی پورت محلی
     time.sleep(2.5)
     
     proxies = {
@@ -281,8 +283,8 @@ def test_xray_node(node, local_port):
     success = True
     for target in TARGETS:
         try:
-            # ارسال درخواست بدون ریدایرکت برای افزایش کارایی و سرعت تست سایت‌ها
-            resp = requests.get(target, proxies=proxies, headers=headers, timeout=5, allow_redirects=False)
+            # اعمال تایم‌اوت سخت‌گیرانه ۱.۵ ثانیه برای گلچین کردن پرسرعت‌ترین کانفیگ‌ها
+            resp = requests.get(target, proxies=proxies, headers=headers, timeout=1.5, allow_redirects=False)
             if resp.status_code is None:
                 success = False
                 break
@@ -332,7 +334,7 @@ def main():
 
     # مرحله ۴: تست اتصال واقعی وبسایت‌ها با Xray Core
     current_stage = "مرحله چهارم: تست اتصال به وبسایت‌های هدف"
-    log("شروع تست نهایی اتصال به اینستاگرام، X و یوتیوب...")
+    log("شروع تست نهایی اتصال به اینستاگرام، X، یوتیوب، آمازون و OpenAI...")
     
     port_queue = Queue()
     for p in range(15000, 15050):  # تخصیص پورت‌های موازی تا سقف ۵۰ تست همزمان
@@ -366,7 +368,7 @@ def main():
         for link in final_configs:
             f.write(link + "\n")
             
-    log(f"پروژه با موفقیت به پایان رسید! {len(final_configs)} کانفیگ کاملاً معتبر و سالم ذخیره شد.")
+    log(f"پروژه با موفقیت به پایان رسید! {len(final_configs)} کانفیگ بسیار سریع و تضمینی ذخیره شد.")
 
 if __name__ == "__main__":
     main()
