@@ -282,8 +282,13 @@ def test_xray_node(node, local_port):
     success = True
     for target in TARGETS:
         try:
-            # تنظیم تایم‌اوت فوق العاده سریع روی 0.2 ثانیه (200 میلی‌ثانیه)
-            resp = requests.get(target, proxies=proxies, headers=headers, timeout=0.2, allow_redirects=False)
+            # مدیریت هوشمند تایم‌اوت بر اساس آدرس سایت هدف
+            if "openai" in target or "amazon" in target:
+                current_timeout = 1.0  # ۱ ثانیه برای سایت‌های سنگین‌تر
+            else:
+                current_timeout = 0.5  # ۵۰۰ میلی‌ثانیه برای یوتیوب، ایکس و اینستاگرام
+                
+            resp = requests.get(target, proxies=proxies, headers=headers, timeout=current_timeout, allow_redirects=False)
             if resp.status_code is None:
                 success = False
                 break
@@ -367,7 +372,7 @@ def main():
         for link in final_configs:
             f.write(link + "\n")
             
-    log(f"پروژه با موفقیت به پایان رسید! {len(final_configs)} کانفیگ با سرعت نور ذخیره شد.")
+    log(f"پروژه با موفقیت به پایان رسید! {len(final_configs)} کانفیگ با تفکیک هوشمند تایم‌اوت ذخیره شد.")
 
 if __name__ == "__main__":
     main()
