@@ -114,7 +114,6 @@ def fetch_url(url):
 # --- بخش بهینه‌سازی شده تست TCP به صورت کاملاً Async ---
 
 async def async_tcp_ping(host, port, timeout=1.5):
-    """تست پینگ به صورت غیرمسدودکننده (Async)"""
     try:
         t_start = time.perf_counter()
         coro = asyncio.open_connection(host, port)
@@ -127,15 +126,15 @@ async def async_tcp_ping(host, port, timeout=1.5):
         return None
 
 async def async_test_ping_and_stddev(node, semaphore):
-    """انجام پینگ متوالی با سیستم Fail-Fast برای تصفیه سریع سرورهای مرده"""
     async with semaphore:
         pings = []
-        for _ in range(5):
+        # بهینه‌سازی: کاهش تعداد پینگ‌ها به ۳ بار برای افزایش چشمگیر سرعت
+        for _ in range(3):
             p = await async_tcp_ping(node["host"], node["port"])
             if p is None:
-                return None  # اگر حتی یک بار پینگ قطع شد، فوراً سرور را رد کن
+                return None  
             pings.append(p)
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.04)
         
         mean = sum(pings) / len(pings)
         variance = sum((x - mean) ** 2 for x in pings) / len(pings)
@@ -146,9 +145,8 @@ async def async_test_ping_and_stddev(node, semaphore):
         return node
 
 async def run_async_pings(parsed_nodes):
-    """مدیریت اجرای موازی ۵۰۰ تست پینگ همزمان در رانر گیت‌هاب"""
     global progress_info
-    semaphore = asyncio.Semaphore(500)
+    semaphore = asyncio.Semaphore(600) # افزایش سقف کانکشن‌های همزمان پینگ
     tasks = [async_test_ping_and_stddev(node, semaphore) for node in parsed_nodes]
     
     alive_nodes = []
@@ -160,7 +158,7 @@ async def run_async_pings(parsed_nodes):
         idx += 1
         if res:
             alive_nodes.append(res)
-        if idx % 200 == 0 or idx == total_nodes:
+        if idx % 300 == 0 or idx == total_nodes:
             progress_info = f"تست پینگ ناهمگام: {idx}/{total_nodes} انجام شد. زنده: {len(alive_nodes)}"
             log(progress_info)
             
@@ -246,6 +244,18 @@ def parse_vless(url_str):
     except:
         return None
 
+def single_http_request(target, proxies, headers):
+    """تابع کمکی برای تست موازی یک سایت واحد"""
+    try:
+        if "openai" in target or "amazon" in target:
+            timeout = 1.0  
+        else:
+            timeout = 0.5  
+        resp = requests.get(target, proxies=proxies, headers=headers, timeout=timeout, allow_redirects=False)
+        return resp.status_code is not None
+    except:
+        return False
+
 def test_xray_node(node, local_port):
     config = {
         "log": {"loglevel": "none"},
@@ -271,7 +281,8 @@ def test_xray_node(node, local_port):
         except:
             return False
 
-    time.sleep(2.5)
+    # بهینه‌سازی: کاهش زمان انتظار لود اولیه Xray از 2.5 ثانیه به 0.7 ثانیه
+    time.sleep(0.7)
     
     proxies = {
         "http": f"socks5h://127.0.0.1:{local_port}",
@@ -279,22 +290,14 @@ def test_xray_node(node, local_port):
     }
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     
+    # بهینه‌سازی انقلابی: تست همزمان (موازی) هر ۵ وب‌سایت به جای تست پشت‌سرهم
     success = True
-    for target in TARGETS:
-        try:
-            # مدیریت هوشمند تایم‌اوت بر اساس آدرس سایت هدف
-            if "openai" in target or "amazon" in target:
-                current_timeout = 1.0  # ۱ ثانیه برای سایت‌های سنگین‌تر
-            else:
-                current_timeout = 0.5  # ۵۰۰ میلی‌ثانیه برای یوتیوب، ایکس و اینستاگرام
-                
-            resp = requests.get(target, proxies=proxies, headers=headers, timeout=current_timeout, allow_redirects=False)
-            if resp.status_code is None:
+    with ThreadPoolExecutor(max_workers=5) as internal_executor:
+        futures = [internal_executor.submit(single_http_request, target, proxies, headers) for target in TARGETS]
+        for future in futures:
+            if not future.result(): # اگر حتی یکی از سایت‌ها لود نشد
                 success = False
                 break
-        except Exception:
-            success = False
-            break
 
     if process:
         process.terminate()
@@ -313,7 +316,7 @@ def main():
     log("شروع جمع‌آوری لینک‌های VLESS...")
     all_raw_links = []
     
-    with ThreadPoolExecutor(max_workers=20) as executor:
+    with ThreadPoolExecutor(max_workers=25) as executor:
         futures = {executor.submit(fetch_url, url): url for url in URLS}
         for i, future in enumerate(as_completed(futures), 1):
             res = future.result()
@@ -338,10 +341,10 @@ def main():
 
     # مرحله ۴: تست اتصال واقعی وبسایت‌ها با Xray Core
     current_stage = "مرحله چهارم: تست اتصال به وبسایت‌های هدف"
-    log("شروع تست نهایی اتصال به اینستاگرام، X، یوتیوب، آمازون و OpenAI...")
+    log("شروع تست نهایی اتصال توربوشارژ به وب‌سایت‌ها...")
     
     port_queue = Queue()
-    for p in range(15000, 15050):  # تخصیص پورت‌های موازی تا سقف ۵۰ تست همزمان
+    for p in range(14000, 14080):  # افزایش تعداد تست‌های موازی همزمان از ۵۰ به ۸۰ پروکسی
         port_queue.put(p)
         
     final_configs = []
@@ -354,7 +357,7 @@ def main():
         finally:
             port_queue.put(port)
 
-    with ThreadPoolExecutor(max_workers=50) as executor:
+    with ThreadPoolExecutor(max_workers=80) as executor:
         futures = [executor.submit(worker_xray, node) for node in alive_nodes]
         total_xray = len(futures)
         for idx, future in enumerate(as_completed(futures), 1):
@@ -372,7 +375,7 @@ def main():
         for link in final_configs:
             f.write(link + "\n")
             
-    log(f"پروژه با موفقیت به پایان رسید! {len(final_configs)} کانفیگ با تفکیک هوشمند تایم‌اوت ذخیره شد.")
+    log(f"پروژه با موفقیت و سرعت خیره‌کننده به پایان رسید! {len(final_configs)} کانفیگ ذخیره شد.")
 
 if __name__ == "__main__":
     main()
