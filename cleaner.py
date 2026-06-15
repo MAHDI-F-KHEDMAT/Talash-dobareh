@@ -133,7 +133,7 @@ async def async_test_ping_and_stddev(node, semaphore):
         for _ in range(5):
             p = await async_tcp_ping(node["host"], node["port"])
             if p is None:
-                return None  # اگر حتی یک بار پینگ قطع شد، فوراً سرور را رد کن (افزایش چشمگیر سرعت)
+                return None  # اگر حتی یک بار پینگ قطع شد، فوراً سرور را رد کن
             pings.append(p)
             await asyncio.sleep(0.05)
         
@@ -282,8 +282,8 @@ def test_xray_node(node, local_port):
     success = True
     for target in TARGETS:
         try:
-            # کاهش تایم‌اوت به ۰.۵ ثانیه جهت فیلترینگ فوق‌العاده سخت‌گیرانه برای سرعت‌های فضایی
-            resp = requests.get(target, proxies=proxies, headers=headers, timeout=0.5, allow_redirects=False)
+            # تنظیم تایم‌اوت فوق العاده سریع روی 0.2 ثانیه (200 میلی‌ثانیه)
+            resp = requests.get(target, proxies=proxies, headers=headers, timeout=0.2, allow_redirects=False)
             if resp.status_code is None:
                 success = False
                 break
@@ -367,7 +367,7 @@ def main():
         for link in final_configs:
             f.write(link + "\n")
             
-    log(f"پروژه با موفقیت به پایان رسید! {len(final_configs)} کانفیگ با سرعت ماورایی ذخیره شد.")
+    log(f"پروژه با موفقیت به پایان رسید! {len(final_configs)} کانفیگ با سرعت نور ذخیره شد.")
 
 if __name__ == "__main__":
     main()
