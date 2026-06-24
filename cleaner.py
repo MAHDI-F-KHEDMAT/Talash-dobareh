@@ -163,6 +163,45 @@ async def run_async_pings(parsed_nodes):
             
     return alive_nodes
 
+# --- بخش جدید: تست پینگ ثانویه و حذف پینگ‌های نامتعارف ---
+async def run_final_ping_filter(nodes, min_ping, max_ping):
+    global progress_info
+    semaphore = asyncio.Semaphore(200) # تعداد کانفیگ‌ها در این مرحله کمتر است، ۲۰۰ موازی کاملاً امن است
+    
+    async def final_check(node):
+        async with semaphore:
+            pings = []
+            for _ in range(2): # دو بار پینگ برای اطمینان کافیست
+                p = await async_tcp_ping(node["host"], node["port"])
+                if p is not None:
+                    pings.append(p)
+                await asyncio.sleep(0.03)
+            
+            if not pings:
+                return None
+                
+            avg_ping = sum(pings) / len(pings)
+            # فیلتر کردن پینگ‌های خارج از محدوده مجاز
+            if min_ping <= avg_ping <= max_ping:
+                return node
+            return None
+
+    tasks = [final_check(n) for n in nodes]
+    filtered_nodes = []
+    total = len(tasks)
+    idx = 0
+    
+    for coro in asyncio.as_completed(tasks):
+        res = await coro
+        idx += 1
+        if res:
+            filtered_nodes.append(res)
+        if idx % 20 == 0 or idx == total:
+            progress_info = f"فیلتر نهایی پینگ: {idx}/{total} انجام شد. تایید شده نهایی: {len(filtered_nodes)}"
+            log(progress_info)
+            
+    return filtered_nodes
+
 # --- پایان بخش Async ---
 
 def parse_vless(url_str):
@@ -270,10 +309,8 @@ def test_xray_node(node, local_port):
             except: pass
             return False
 
-    # اصلاح: ۱ ثانیه زمان امن برای لود کامل کورِ ایکس‌ری روی پردازنده‌های مختلف
     time.sleep(1.0)
     
-    # اگر پروسه بلافاصله کرش کرده باشد، کانفیگ خراب است و فوراً رد شو
     if process.poll() is not None:
         try: os.remove(config_path)
         except: pass
@@ -285,7 +322,6 @@ def test_xray_node(node, local_port):
     }
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     
-    # اصلاح حیاتی: اجرای خطیِ فوق‌سریع بجای ترد مجدد برای جلوگیری از هنگ کردن کل سیستم
     success = True
     for target in TARGETS:
         try:
@@ -346,16 +382,17 @@ def main():
     log("شروع تست نهایی اتصال با ثبات بالا به وب‌سایت‌ها...")
     
     port_queue = Queue()
-    for p in range(14000, 14060):  # ۶۰ پورت موازی ایمن برای عدم اشباع سیستم
+    for p in range(14000, 14060):  
         port_queue.put(p)
         
-    final_configs = []
+    # اصلاح خروجی: ذخیره به صورت دیکشنری کامل نودها به جای رشته ساده URL
+    final_nodes = []
     
     def worker_xray(node_data):
         port = port_queue.get()
         try:
             is_ok = test_xray_node(node_data, port)
-            return node_data["url"] if is_ok else None
+            return node_data if is_ok else None  # تغییر یافته جهت نگهداری دیتای نود
         finally:
             port_queue.put(port)
 
@@ -365,19 +402,36 @@ def main():
         for idx, future in enumerate(as_completed(futures), 1):
             res = future.result()
             if res:
-                final_configs.append(res)
+                final_nodes.append(res)
             if idx % 50 == 0 or idx == total_xray:
-                progress_info = f"تست Xray: {idx}/{total_xray} انجام شد. عبور کرده: {len(final_configs)}"
+                progress_info = f"تست Xray: {idx}/{total_xray} انجام شد. عبور کرده: {len(final_nodes)}"
                 log(progress_info)
 
-    # مرحله ۵: ذخیره‌سازی خروجی خروجی نهایی معتبر
+    log(f"تعداد کانفیگ‌های تایید شده توسط Xray: {len(final_nodes)}")
+
+    # مرحله اصلاحی جدید: فیلتر مجدد بر اساس بازه مجاز پینگ به میلی ثانیه
+    current_stage = "مرحله اصلاحی: فیلتر پینگ‌های نامتعارف"
+    log("شروع فیلتر نهایی پینگ (حذف پینگ‌های خیلی کم و خیلی زیاد)...")
+    
+    # --- تنظیمات بازه پینگ مجاز (میلی ثانیه) ---
+    MIN_PING_LIMIT = 20.0   # پینگ‌های زیر ۲۰ میلی‌ثانیه احتمالاً آیپی داخلی یا ارور لودباکس هستند و حذف می‌شوند
+    MAX_PING_LIMIT = 750.0  # پینگ‌های بالای ۷۵۰ میلی‌ثانیه به دلیل کندی شدید حذف می‌شوند
+    # ----------------------------------------
+    
+    filtered_final_nodes = asyncio.run(run_final_ping_filter(final_nodes, MIN_PING_LIMIT, MAX_PING_LIMIT))
+    log(f"فیلتر پینگ نهایی انجام شد. تعداد نودهای طلایی نهایی: {len(filtered_final_nodes)}")
+
+    # مرحله ۵: ذخیره‌سازی خروجی نهایی معتبر
     current_stage = "مرحله پنجم: ذخیره خروجی"
     output_filename = "results.txt"
     with open(output_filename, "w", encoding="utf-8") as f:
-        for link in final_configs:
-            f.write(link + "\n")
+        for node in filtered_final_nodes:
+            f.write(node["url"] + "\n")
             
-    log(f"پروژه با موفقیت به پایان رسید! {len(final_configs)} کانفیگ طلایی در فایل {output_filename} ذخیره شد.")
+    log(f"پروژه با موفقیت به پایان رسید! {len(filtered_final_nodes)} کانفیگ طلایی در فایل {output_filename} ذخیره شد.")
+
+if __name__ == "__main__":
+    main()
 
 if __name__ == "__main__":
     main()
