@@ -1,1 +1,0 @@
-# Talash-dobareh
